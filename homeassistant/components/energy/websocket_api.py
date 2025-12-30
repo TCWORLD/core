@@ -247,6 +247,7 @@ async def ws_solar_forecast(
         vol.Required("start_time"): str,
         vol.Optional("end_time"): str,
         vol.Required("statistic_ids"): vol.All([str], vol.Length(min=1)),
+        vol.Optional("statistic_invert"): [bool],
         vol.Required("period"): vol.Any("5minute", "hour", "day", "week", "month"),
         vol.Optional("units"): UNIT_SCHEMA,
     }
@@ -278,6 +279,18 @@ async def ws_get_power_statistics(
         end_time = None
 
     statistic_ids = msg["statistic_ids"]
+    statistic_invert = msg.get("statistic_invert")
+
+    if statistic_invert is not None:
+        if len(statistic_invert) == 0:
+            statistic_invert = None
+        elif len(statistic_invert) == 1:
+            statistic_invert = [statistic_invert[0]] * len(statistic_ids)
+        elif len(statistic_invert) != len(statistic_ids):
+            connection.send_error(
+                msg["id"], "invalid_statistic_invert", "Invalid statistic_invert"
+            )
+            return
 
     # Fetch power statistics for requested period
     statistics = await recorder.get_instance(hass).async_add_executor_job(
@@ -306,7 +319,7 @@ async def ws_get_power_statistics(
     else:
         statistics_hour = None
 
-    for statistics_id in statistic_ids:
+    for stat_idx, statistics_id in enumerate(statistic_ids):
         # Check if we have extra hourly data
         statistic_rows = statistics.get(statistics_id) if statistics else None
         statistic_rows_hour = (
@@ -331,10 +344,16 @@ async def ws_get_power_statistics(
         elif not statistic_rows:
             # Skip as we have no statistics data
             continue
+        # For each statistic, check if it needs to be inverted
+        statistic_do_invert = False
+        if statistic_invert is not None:
+            statistic_do_invert = statistic_invert[stat_idx]
         # Update all rows for this statistic accordingly
         for row in statistic_rows:
             row["start"] = int(row["start"] * 1000)
             row["end"] = int(row["end"] * 1000)
+            if statistic_do_invert and row["mean"]:
+                row["mean"] = 0 - row["mean"]
 
     connection.send_message(json_bytes(messages.result_message(msg["id"], statistics)))
 
