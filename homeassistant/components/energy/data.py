@@ -65,8 +65,8 @@ class GridPowerSourceType(TypedDict):
     # statistic_id of a power meter (kW)
     # negative values indicate grid return
     stat_rate: str
-    # Whether to negate the power source such that negative means grid import
-    stat_rate_negate: NotRequired[bool]
+    # Whether to invert direction of the power source such that negative means grid import
+    stat_rate_invert: NotRequired[bool]
 
 
 class GridSourceType(TypedDict):
@@ -88,7 +88,7 @@ class SolarSourceType(TypedDict):
 
     stat_energy_from: str
     stat_rate: NotRequired[str]
-    stat_rate_negate: NotRequired[bool]
+    stat_rate_invert: NotRequired[bool]
     config_entry_solar_forecast: list[str] | None
 
 
@@ -101,8 +101,8 @@ class BatterySourceType(TypedDict):
     stat_energy_to: str
     # positive when discharging, negative when charging
     stat_rate: NotRequired[str]
-    # Whether to negate power such that negative means discharging
-    stat_rate_negate: NotRequired[bool]
+    # Whether to invert direction of power such that negative means discharging
+    stat_rate_invert: NotRequired[bool]
 
 
 class GasSourceType(TypedDict):
@@ -219,7 +219,7 @@ FLOW_TO_GRID_SOURCE_SCHEMA = vol.Schema(
 GRID_POWER_SOURCE_SCHEMA = vol.Schema(
     {
         vol.Required("stat_rate"): str,
-        vol.Optional("stat_rate_negate"): bool,
+        vol.Optional("stat_rate_invert"): bool,
     }
 )
 
@@ -265,7 +265,7 @@ SOLAR_SOURCE_SCHEMA = vol.Schema(
         vol.Required("type"): "solar",
         vol.Required("stat_energy_from"): str,
         vol.Optional("stat_rate"): str,
-        vol.Optional("stat_rate_negate"): bool,
+        vol.Optional("stat_rate_invert"): bool,
         vol.Optional("config_entry_solar_forecast"): vol.Any([str], None),
     }
 )
@@ -275,7 +275,7 @@ BATTERY_SOURCE_SCHEMA = vol.Schema(
         vol.Required("stat_energy_from"): str,
         vol.Required("stat_energy_to"): str,
         vol.Optional("stat_rate"): str,
-        vol.Optional("stat_rate_negate"): bool,
+        vol.Optional("stat_rate_invert"): bool,
     }
 )
 GAS_SOURCE_SCHEMA = vol.Schema(
