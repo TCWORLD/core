@@ -14,6 +14,7 @@ from homeassistant.const import (
     CONCENTRATION_PARTS_PER_MILLION,
     PERCENTAGE,
     UNIT_NOT_RECOGNIZED_TEMPLATE,
+    UnitConversionOperation,
     UnitOfApparentPower,
     UnitOfArea,
     UnitOfBloodGlucoseConcentration,
@@ -136,6 +137,22 @@ class BaseUnitConverter:
         if cls._are_unit_inverses(from_unit, to_unit):
             return lambda val: to_ratio / (val / from_ratio)
         return lambda val: (val / from_ratio) * to_ratio
+
+    @classmethod
+    def convert_operations(
+        cls, from_unit: str | None, to_unit: str | None
+    ) -> list[tuple[UnitConversionOperation, float]]:
+        """Return a set of operations to convert one unit of measurement to another."""
+        if from_unit == to_unit:
+            return []
+        from_ratio, to_ratio = cls._get_from_to_ratio(from_unit, to_unit)
+        if cls._are_unit_inverses(from_unit, to_unit):
+            return [
+                (UnitConversionOperation.MULTIPLY, 1 / from_ratio),
+                (UnitConversionOperation.POWER, -1),
+                (UnitConversionOperation.MULTIPLY, to_ratio),
+            ]
+        return [(UnitConversionOperation.MULTIPLY, to_ratio / from_ratio)]
 
     @classmethod
     def _get_from_to_ratio(
@@ -675,6 +692,28 @@ class SpeedConverter(BaseUnitConverter):
         return cls._converter_factory(from_unit, to_unit)
 
     @classmethod
+    def convert_operations(
+        cls, from_unit: str | None, to_unit: str | None
+    ) -> list[tuple[UnitConversionOperation, float]]:
+        """Return a set of operations to convert one unit of measurement to another."""
+        cls._check_supported_units(from_unit, to_unit)
+
+        if from_unit == UnitOfSpeed.BEAUFORT:
+            to_ratio = cls._UNIT_CONVERSION[to_unit]
+            return [
+                *cls._beaufort_to_ms_ops(),
+                (UnitConversionOperation.MULTIPLY, to_ratio),
+            ]
+        if to_unit == UnitOfSpeed.BEAUFORT:
+            from_ratio = cls._UNIT_CONVERSION[from_unit]
+            return [
+                (UnitConversionOperation.MULTIPLY, 1 / from_ratio),
+                *cls._ms_to_beaufort_ops(),
+            ]
+
+        return super().convert_operations(from_unit, to_unit)
+
+    @classmethod
     @lru_cache
     def converter_factory_allow_none(
         cls, from_unit: str | None, to_unit: str | None
@@ -690,12 +729,7 @@ class SpeedConverter(BaseUnitConverter):
         return lambda value: None if value is None else convert(value)
 
     @classmethod
-    def _converter_factory(
-        cls, from_unit: str | None, to_unit: str | None
-    ) -> Callable[[float], float]:
-        """Convert a speed from one unit to another, eg. 14m/s will return 7Bft."""
-        # We cannot use the implementation from BaseUnitConverter here because the
-        # Beaufort scale is not a constant value to divide or multiply with.
+    def _check_supported_units(cls, from_unit: str | None, to_unit: str | None) -> None:
         if (
             from_unit not in SpeedConverter.VALID_UNITS
             or to_unit not in SpeedConverter.VALID_UNITS
@@ -703,6 +737,15 @@ class SpeedConverter(BaseUnitConverter):
             raise HomeAssistantError(
                 UNIT_NOT_RECOGNIZED_TEMPLATE.format(to_unit, cls.UNIT_CLASS)
             )
+
+    @classmethod
+    def _converter_factory(
+        cls, from_unit: str | None, to_unit: str | None
+    ) -> Callable[[float], float]:
+        """Convert a speed from one unit to another, eg. 14m/s will return 7Bft."""
+        # We cannot use the implementation from BaseUnitConverter here because the
+        # Beaufort scale is not a constant value to divide or multiply with.
+        cls._check_supported_units(from_unit, to_unit)
 
         if from_unit == UnitOfSpeed.BEAUFORT:
             to_ratio = cls._UNIT_CONVERSION[to_unit]
@@ -720,9 +763,26 @@ class SpeedConverter(BaseUnitConverter):
         return float(round(((ms / 0.836) ** 2) ** (1 / 3)))
 
     @classmethod
+    def _ms_to_beaufort_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a speed in m/s to Beaufort."""
+        return [
+            (UnitConversionOperation.MULTIPLY, 1 / 0.836),
+            (UnitConversionOperation.POWER, 2 / 3),
+            (UnitConversionOperation.ROUND, 0),
+        ]
+
+    @classmethod
     def _beaufort_to_ms(cls, beaufort: float) -> float:
         """Convert a speed in Beaufort to m/s."""
         return float(0.836 * beaufort ** (3 / 2))
+
+    @classmethod
+    def _beaufort_to_ms_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a speed in Beaufort to m/s."""
+        return [
+            (UnitConversionOperation.POWER, 3 / 2),
+            (UnitConversionOperation.MULTIPLY, 0.836),
+        ]
 
 
 class SulphurDioxideConcentrationConverter(BaseUnitConverter):
@@ -769,6 +829,44 @@ class TemperatureConverter(BaseUnitConverter):
             return lambda value: value
 
         return cls._converter_factory(from_unit, to_unit)
+
+    @classmethod
+    def convert_operations(
+        cls, from_unit: str | None, to_unit: str | None
+    ) -> list[tuple[UnitConversionOperation, float]]:
+        """Return a set of operations to convert one unit of measurement to another."""
+        if from_unit == to_unit:
+            return []
+
+        if from_unit == UnitOfTemperature.CELSIUS:
+            if to_unit == UnitOfTemperature.FAHRENHEIT:
+                return cls._celsius_to_fahrenheit_ops()
+            if to_unit == UnitOfTemperature.KELVIN:
+                return cls._celsius_to_kelvin_ops()
+            raise HomeAssistantError(
+                UNIT_NOT_RECOGNIZED_TEMPLATE.format(to_unit, cls.UNIT_CLASS)
+            )
+
+        if from_unit == UnitOfTemperature.FAHRENHEIT:
+            if to_unit == UnitOfTemperature.CELSIUS:
+                return cls._fahrenheit_to_celsius_ops()
+            if to_unit == UnitOfTemperature.KELVIN:
+                return cls._fahrenheit_to_kelvin_ops()
+            raise HomeAssistantError(
+                UNIT_NOT_RECOGNIZED_TEMPLATE.format(to_unit, cls.UNIT_CLASS)
+            )
+
+        if from_unit == UnitOfTemperature.KELVIN:
+            if to_unit == UnitOfTemperature.CELSIUS:
+                return cls._kelvin_to_celsius_ops()
+            if to_unit == UnitOfTemperature.FAHRENHEIT:
+                return cls._kelvin_to_fahrenheit_ops()
+            raise HomeAssistantError(
+                UNIT_NOT_RECOGNIZED_TEMPLATE.format(to_unit, cls.UNIT_CLASS)
+            )
+        raise HomeAssistantError(
+            UNIT_NOT_RECOGNIZED_TEMPLATE.format(from_unit, cls.UNIT_CLASS)
+        )
 
     @classmethod
     @lru_cache
@@ -849,9 +947,19 @@ class TemperatureConverter(BaseUnitConverter):
         return (kelvin - 273.15) * 1.8 + 32.0
 
     @classmethod
+    def _kelvin_to_fahrenheit_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a temperature in Kelvin to Fahrenheit."""
+        return [*cls._kelvin_to_celsius_ops(), *cls._celsius_to_fahrenheit_ops()]
+
+    @classmethod
     def _fahrenheit_to_kelvin(cls, fahrenheit: float) -> float:
         """Convert a temperature in Fahrenheit to Kelvin."""
         return 273.15 + ((fahrenheit - 32.0) / 1.8)
+
+    @classmethod
+    def _fahrenheit_to_kelvin_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a temperature in Fahrenheit to Kelvin."""
+        return [*cls._fahrenheit_to_celsius_ops(), *cls._celsius_to_kelvin_ops()]
 
     @classmethod
     def _fahrenheit_to_celsius(cls, fahrenheit: float) -> float:
@@ -859,9 +967,22 @@ class TemperatureConverter(BaseUnitConverter):
         return (fahrenheit - 32.0) / 1.8
 
     @classmethod
+    def _fahrenheit_to_celsius_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a temperature in Fahrenheit to Celsius."""
+        return [
+            (UnitConversionOperation.ADD, -32.0),
+            (UnitConversionOperation.MULTIPLY, 1 / 1.8),
+        ]
+
+    @classmethod
     def _kelvin_to_celsius(cls, kelvin: float) -> float:
         """Convert a temperature in Kelvin to Celsius."""
         return kelvin - 273.15
+
+    @classmethod
+    def _kelvin_to_celsius_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a temperature in Kelvin to Celsius."""
+        return [(UnitConversionOperation.ADD, -273.15)]
 
     @classmethod
     def _celsius_to_fahrenheit(cls, celsius: float) -> float:
@@ -869,9 +990,22 @@ class TemperatureConverter(BaseUnitConverter):
         return celsius * 1.8 + 32.0
 
     @classmethod
+    def _celsius_to_fahrenheit_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a temperature in Celsius to Fahrenheit."""
+        return [
+            (UnitConversionOperation.MULTIPLY, 1.8),
+            (UnitConversionOperation.ADD, 32.0),
+        ]
+
+    @classmethod
     def _celsius_to_kelvin(cls, celsius: float) -> float:
         """Convert a temperature in Celsius to Kelvin."""
         return celsius + 273.15
+
+    @classmethod
+    def _celsius_to_kelvin_ops(cls) -> list[tuple[UnitConversionOperation, float]]:
+        """Operations to convert a temperature in Celsius to Kelvin."""
+        return [(UnitConversionOperation.ADD, 273.15)]
 
 
 class TemperatureDeltaConverter(BaseUnitConverter):

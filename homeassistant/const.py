@@ -833,6 +833,16 @@ class UnitOfDataRate(StrEnum):
     GIBIBYTES_PER_SECOND = "GiB/s"
 
 
+# Unit conversion operations
+class UnitConversionOperation(StrEnum):
+    """Unit conversion operations."""
+
+    MULTIPLY = "multiply"  # Multiply value by
+    ADD = "add"  # Add to value
+    POWER = "power"  # Raise value to the power of
+    ROUND = "round"  # Round value to specified number of decimals
+
+
 # States
 COMPRESSED_STATE_STATE: Final = "s"
 COMPRESSED_STATE_ATTRIBUTES: Final = "a"
