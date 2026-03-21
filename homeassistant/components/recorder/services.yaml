@@ -109,3 +109,27 @@ get_statistics:
         temperature: "°C"
       selector:
         object:
+
+get_statistics_unit_conversion:
+  fields:
+    statistic_ids:
+      required: true
+      example:
+        - sensor.energy_consumption
+        - sensor.temperature
+      selector:
+        statistic:
+          multiple: true
+
+    from_state:
+      default: false
+      selector:
+        boolean:
+
+    units:
+      required: false
+      example:
+        energy: "kWh"
+        temperature: "°C"
+      selector:
+        object:

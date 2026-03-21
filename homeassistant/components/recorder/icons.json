@@ -9,6 +9,9 @@
     "get_statistics": {
       "service": "mdi:chart-bar"
     },
+    "get_statistics_unit_conversion": {
+      "service": "mdi:chart-bar"
+    },
     "purge": {
       "service": "mdi:database-sync"
     },

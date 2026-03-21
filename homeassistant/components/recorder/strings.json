@@ -48,6 +48,24 @@
       },
       "name": "Get statistics"
     },
+    "get_statistics_unit_conversion": {
+      "description": "Retrieves statistics unit conversion operations for entities.",
+      "fields": {
+        "from_state": {
+          "description": "Whether converting from statistic to unit, or from state value to unit.",
+          "name": "From State"
+        },
+        "statistic_ids": {
+          "description": "The entity IDs or statistic IDs to return statistics for.",
+          "name": "Statistic IDs"
+        },
+        "units": {
+          "description": "Optional unit conversion mapping.",
+          "name": "Units"
+        }
+      },
+      "name": "Get statistics unit conversion"
+    },
     "purge": {
       "description": "Starts purge task - to clean up old data from your database.",
       "fields": {

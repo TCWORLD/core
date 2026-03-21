@@ -26,7 +26,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonArrayType, JsonObjectType
 
 from .const import ATTR_APPLY_FILTER, ATTR_KEEP_DAYS, ATTR_REPACK, DOMAIN
-from .statistics import statistics_during_period
+from .statistics import statistics_during_period, statistics_unit_conversion_operations
 from .tasks import PurgeEntitiesTask, PurgeTask
 
 SERVICE_PURGE = "purge"
@@ -34,6 +34,7 @@ SERVICE_PURGE_ENTITIES = "purge_entities"
 SERVICE_ENABLE = "enable"
 SERVICE_DISABLE = "disable"
 SERVICE_GET_STATISTICS = "get_statistics"
+SERVICE_GET_STATISTICS_UNIT_CONVERSION = "get_statistics_unit_conversion"
 
 SERVICE_PURGE_SCHEMA = vol.Schema(
     {
@@ -84,6 +85,14 @@ SERVICE_GET_STATISTICS_SCHEMA = vol.Schema(
             cv.ensure_list,
             [vol.In(["change", "last_reset", "max", "mean", "min", "state", "sum"])],
         ),
+        vol.Optional("units"): vol.Schema({cv.string: cv.string}),
+    }
+)
+
+SERVICE_GET_STATISTICS_UNIT_CONVERSION_SCHEMA = vol.Schema(
+    {
+        vol.Required("statistic_ids"): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional("from_state", default=False): cv.boolean,
         vol.Optional("units"): vol.Schema({cv.string: cv.string}),
     }
 )
@@ -180,6 +189,36 @@ async def _async_handle_get_statistics_service(
     return {"statistics": formatted_result}
 
 
+async def _async_handle_get_statistics_unit_conversion_service(
+    service: ServiceCall,
+) -> ServiceResponse:
+    """Handle calls to the get_statistics_unit_conversion service."""
+    hass = service.hass
+
+    statistic_ids = service.data["statistic_ids"]
+    from_state = service.data.get("from_state", False)
+    units = service.data.get("units")
+
+    result = await hass.data[DATA_INSTANCE].async_add_executor_job(
+        statistics_unit_conversion_operations,
+        hass,
+        statistic_ids,
+        from_state,
+        units,
+    )
+
+    formatted_result: JsonObjectType = {}
+    for statistic_id, statistic_rows in result.items():
+        formatted_row: JsonObjectType = {}
+        if (operation := statistic_rows.get("operation")) is not None:
+            formatted_row["operation"] = operation
+        if (factor := statistic_rows.get("factor")) is not None:
+            formatted_row["factor"] = factor
+        formatted_result[statistic_id] = formatted_row
+
+    return {"unit_conversion": formatted_result}
+
+
 @callback
 def async_setup_services(hass: HomeAssistant) -> None:
     """Register recorder services."""
@@ -221,5 +260,14 @@ def async_setup_services(hass: HomeAssistant) -> None:
         SERVICE_GET_STATISTICS,
         _async_handle_get_statistics_service,
         schema=SERVICE_GET_STATISTICS_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_GET_STATISTICS_UNIT_CONVERSION,
+        _async_handle_get_statistics_unit_conversion_service,
+        schema=SERVICE_GET_STATISTICS_UNIT_CONVERSION_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
