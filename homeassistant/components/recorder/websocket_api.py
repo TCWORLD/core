@@ -60,6 +60,7 @@ from .statistics import (
     list_statistic_ids,
     statistic_during_period,
     statistics_during_period,
+    statistics_unit_conversion_operations,
     update_statistics_issues,
     validate_statistics,
 )
@@ -126,6 +127,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_change_statistics_unit)
     websocket_api.async_register_command(hass, ws_clear_statistics)
     websocket_api.async_register_command(hass, ws_get_statistic_during_period)
+    websocket_api.async_register_command(hass, ws_get_statistics_unit_conversion)
     websocket_api.async_register_command(hass, ws_get_statistics_during_period)
     websocket_api.async_register_command(hass, ws_get_statistics_metadata)
     websocket_api.async_register_command(hass, ws_list_statistic_ids)
@@ -187,6 +189,49 @@ async def ws_get_statistic_during_period(
             end_time,
             msg["statistic_id"],
             msg.get("types"),
+            msg.get("units"),
+        )
+    )
+
+
+def _ws_get_statistics_unit_conversion(
+    hass: HomeAssistant,
+    msg_id: int,
+    statistic_ids: set[str] | None,
+    from_state: bool,
+    units: dict[str, str],
+) -> bytes:
+    """Fetch operations to convert statistic values to desired units."""
+    return json_bytes(
+        messages.result_message(
+            msg_id,
+            statistics_unit_conversion_operations(
+                hass, statistic_ids, from_state, units=units
+            ),
+        )
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "recorder/statistics_unit_conversion",
+        vol.Required("statistic_ids"): vol.All([str], vol.Length(min=1)),
+        vol.Optional("from_state", default=False): cv.boolean,
+        vol.Optional("units"): UNIT_SCHEMA,
+    }
+)
+@websocket_api.async_response
+async def ws_get_statistics_unit_conversion(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Handle statistics websocket command."""
+    connection.send_message(
+        await get_instance(hass).async_add_executor_job(
+            _ws_get_statistics_unit_conversion,
+            hass,
+            msg["id"],
+            set(msg["statistic_ids"]),
+            msg.get("from_state", False),
             msg.get("units"),
         )
     )
