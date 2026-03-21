@@ -32,7 +32,7 @@ from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.lambdas import StatementLambdaElement
 import voluptuous as vol
 
-from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
+from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, UnitConversionOperation
 from homeassistant.core import HomeAssistant, callback, valid_entity_id
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.frame import report_usage
@@ -373,16 +373,16 @@ def get_display_unit(
     return state_unit
 
 
-def _get_statistic_to_display_unit_converter(
+def _get_unit_converter_and_display_unit(
     unit_class: str | None,
     statistic_unit: str | None,
     state_unit: str | None,
     requested_units: dict[str, str] | None,
-    allow_none: bool = True,
-) -> Callable[[float | None], float | None] | Callable[[float], float] | None:
-    """Prepare a converter from the statistics unit to display unit."""
+) -> tuple[type[BaseUnitConverter] | None, str | None]:
+    """Return the unit converter and display unit for the given class and unit information."""
+
     if (converter := _get_unit_converter(unit_class, statistic_unit)) is None:
-        return None
+        return (None, None)
 
     display_unit: str | None
     unit_class = converter.UNIT_CLASS
@@ -393,9 +393,28 @@ def _get_statistic_to_display_unit_converter(
 
     if display_unit not in converter.VALID_UNITS:
         # Guard against invalid state unit in the DB
-        return None
+        return (None, None)
 
     if display_unit == statistic_unit:
+        return (None, None)
+    return (converter, display_unit)
+
+
+def _get_statistic_to_display_unit_converter(
+    unit_class: str | None,
+    statistic_unit: str | None,
+    state_unit: str | None,
+    requested_units: dict[str, str] | None,
+    allow_none: bool = True,
+) -> Callable[[float | None], float | None] | Callable[[float], float] | None:
+    """Prepare a converter from the statistics unit to display unit."""
+    converter, display_unit = _get_unit_converter_and_display_unit(
+        unit_class,
+        statistic_unit,
+        state_unit,
+        requested_units,
+    )
+    if converter is None:
         return None
 
     if allow_none:
@@ -403,6 +422,25 @@ def _get_statistic_to_display_unit_converter(
             from_unit=statistic_unit, to_unit=display_unit
         )
     return converter.converter_factory(from_unit=statistic_unit, to_unit=display_unit)
+
+
+def _get_statistic_to_display_unit_operations(
+    unit_class: str | None,
+    statistic_unit: str | None,
+    state_unit: str | None,
+    requested_units: dict[str, str] | None,
+) -> list[tuple[UnitConversionOperation, float]] | None:
+    """Prepare a converter from the statistics unit to display unit."""
+    converter, display_unit = _get_unit_converter_and_display_unit(
+        unit_class,
+        statistic_unit,
+        state_unit,
+        requested_units,
+    )
+    if converter is None:
+        return None
+
+    return converter.convert_operations(from_unit=statistic_unit, to_unit=display_unit)
 
 
 def _get_display_to_statistic_unit_converter_func(
@@ -1913,6 +1951,60 @@ def statistic_during_period(
     if not convert:
         return result
     return {key: convert(value) for key, value in result.items()}
+
+
+def statistics_unit_conversion_operations(
+    hass: HomeAssistant,
+    statistic_ids: set[str] | None,
+    from_state: bool,
+    units: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Return required operations to convert statistics values to desired units."""
+    result: dict[str, Any] = {}
+    if statistic_ids is None:
+        return result
+
+    if not isinstance(statistic_ids, set):
+        # This is for backwards compatibility to avoid a breaking change
+        # for custom integrations that call this method.
+        statistic_ids = set(statistic_ids)  # type: ignore[unreachable]
+
+    # Fetch metadata for the given statistic_id
+    metadata = None
+    with session_scope(hass=hass, read_only=True) as session:
+        metadata = get_instance(hass).statistics_meta_manager.get_many(
+            session, statistic_ids=statistic_ids
+        )
+        if not metadata:
+            return result
+
+    # Get operations for each statistic
+    for statistic_id in statistic_ids:
+        # Check we found metadata for this statistic
+        statistic_meta = metadata.get(statistic_id)
+        if not statistic_meta:
+            continue
+
+        # Determine conversion from units
+        unit_class = statistic_meta[1]["unit_class"]
+        state_unit = unit = statistic_meta[1]["unit_of_measurement"]
+        if state := hass.states.get(statistic_id):
+            state_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+        if from_state:
+            unit = state_unit
+
+        # Get operations to perform conversion
+        convert_ops = _get_statistic_to_display_unit_operations(
+            unit_class, unit, state_unit, units
+        )
+        if not convert_ops:
+            continue
+
+        # Save operations as dictionary of ops and factors
+        operations, factors = zip(*convert_ops, strict=False)
+        result[statistic_id] = {"operation": operations, "factor": factors}
+
+    return result
 
 
 _type_column_mapping = {
