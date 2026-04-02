@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 import copy
 from dataclasses import dataclass
 import logging
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, TypeIs, cast
 
 from homeassistant.components.sensor import (
     ATTR_LAST_RESET,
@@ -686,19 +686,11 @@ class EnergyPowerSensor(SensorEntity):
         """Return if entity is available."""
         if self._is_inverted:
             source = self.hass.states.get(self._source_sensors[0])
-            return source is not None and source.state not in (
-                "unknown",
-                "unavailable",
-            )
+            return _is_valid_sensor_state(source)
         if self._is_combined:
             discharge = self.hass.states.get(self._source_sensors[0])
             charge = self.hass.states.get(self._source_sensors[1])
-            return (
-                discharge is not None
-                and charge is not None
-                and discharge.state not in ("unknown", "unavailable")
-                and charge.state not in ("unknown", "unavailable")
-            )
+            return _is_valid_sensor_state(discharge) and _is_valid_sensor_state(charge)
         return True
 
     @callback
@@ -706,7 +698,7 @@ class EnergyPowerSensor(SensorEntity):
         """Update the sensor state based on source sensors."""
         if self._is_inverted:
             source_state = self.hass.states.get(self._source_sensors[0])
-            if source_state is None or source_state.state in ("unknown", "unavailable"):
+            if not _is_valid_sensor_state(source_state):
                 self._attr_native_value = None
                 return
             try:
@@ -721,12 +713,9 @@ class EnergyPowerSensor(SensorEntity):
             discharge_state = self.hass.states.get(self._source_sensors[0])
             charge_state = self.hass.states.get(self._source_sensors[1])
 
-            if (
-                discharge_state is None
-                or charge_state is None
-                or discharge_state.state in ("unknown", "unavailable")
-                or charge_state.state in ("unknown", "unavailable")
-            ):
+            if not _is_valid_sensor_state(
+                discharge_state
+            ) or not _is_valid_sensor_state(charge_state):
                 self._attr_native_value = None
                 return
 
@@ -829,3 +818,8 @@ class EnergyPowerSensor(SensorEntity):
         """Abort adding an entity to a platform."""
         _set_result_unless_done(self.add_finished)
         super().add_to_platform_abort()
+
+
+def _is_valid_sensor_state(sensor: State | None) -> TypeIs[State]:
+    """Check if a sensor has a valid state."""
+    return sensor is not None and sensor.state not in ("unknown", "unavailable")
