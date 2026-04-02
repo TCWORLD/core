@@ -80,6 +80,33 @@ class PowerConfig(TypedDict, total=False):
     stat_rate_to: str  # Battery: charge, Grid: return
 
 
+class HeatingConfig(TypedDict):
+    """Dictionary holding heating power sensor configuration options.
+
+    Users configure the following sensors:
+    1. A single optional sensor consisting of power consumed
+    2. Sensors for flow temperature, return temperature, flow rate.
+    3. A single sensor consisting of power delivered.
+    The power delivered sensor can be omitted and it will be calculated
+    from the three other sensors and heat capacity value.
+    """
+
+    # Optional power to heating system
+    stat_rate_to: NotRequired[str]
+
+    # Heating system metering parameters
+    stat_rate_fluid: str  # Instantaneous fluid flow rate: L/min, gal/min, m³/h, etc.
+    stat_temp_from: str  # Fluid supply temperature
+    stat_temp_to: str  # Fluid return temperature
+
+    # Optional power delivered as heat. Can be calculated from above.
+    stat_rate_from: NotRequired[str]
+
+    # Used to calculate power delivered if stat_rate is not provided.
+    # Heat capacity of fluid (J/kg/K). By default assumes water, 4184 J/kg/K.
+    number_heat_capacity: float | None
+
+
 class GridPowerSourceType(TypedDict, total=False):
     """Dictionary holding the source of grid power consumption."""
 
@@ -206,12 +233,32 @@ class WaterSourceType(TypedDict):
     number_energy_price: float | None  # Price for energy ($/m³)
 
 
+class HeatingSourceType(TypedDict):
+    """Dictionary holding the source of household heating."""
+
+    type: Literal["heating"]
+
+    # Heating energy delivered (output from heating system)
+    stat_energy_from: str
+
+    # Heating energy consumed (input to heating system - heatpump electricity, boiler gas, etc.)
+    # Can be none if energy consumption is not available.
+    stat_energy_to: str | None
+
+    # Instantaneous power delivered (derived from heating_config, either original or calculated)
+    stat_rate: NotRequired[str]
+
+    # User's original heating sensor configuration
+    heating_config: NotRequired[HeatingConfig]
+
+
 type SourceType = (
     GridSourceType
     | SolarSourceType
     | BatterySourceType
     | GasSourceType
     | WaterSourceType
+    | HeatingSourceType
 )
 
 
@@ -358,6 +405,41 @@ POWER_CONFIG_SCHEMA = vol.All(
 )
 
 
+def _validate_heating_config(val: dict[str, Any]) -> dict[str, Any]:
+    """Validate heating_config has at least one configuration method."""
+    if not val:
+        raise vol.Invalid("heating_config must have at least one option")
+
+    # Ensure at least one power delivered configuration method is used
+    has_delivered = "stat_rate_from" in val
+    has_flow = "stat_rate_fluid" in val
+
+    methods_count = sum([has_delivered, has_flow])
+    if methods_count < 1:
+        raise vol.Invalid(
+            "heating_config must have at least one option for calculating delivered power."
+        )
+
+    return val
+
+
+HEATING_CONFIG_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Optional("stat_rate_to"): str,
+            vol.Optional("stat_rate_from"): str,
+            # from=supply, to=return
+            vol.Inclusive("stat_rate_fluid", "flow_sensors"): str,
+            vol.Inclusive("stat_temp_from", "flow_sensors"): str,
+            vol.Inclusive("stat_temp_to", "flow_sensors"): str,
+            # Optional heat capacity
+            vol.Optional("number_heat_capacity"): vol.Any(vol.Coerce(float), None),
+        }
+    ),
+    _validate_heating_config,
+)
+
+
 GRID_POWER_SOURCE_SCHEMA = vol.All(
     vol.Schema(
         {
@@ -488,6 +570,17 @@ BATTERY_SOURCE_SCHEMA = vol.Schema(
     }
 )
 
+HEATING_SOURCE_SCHEMA = vol.All(
+    {
+        vol.Required("type"): "heating",
+        vol.Optional("stat_energy_from"): str,
+        vol.Required("stat_energy_to"): str,
+        # Both stat_rate and heating_config are optional
+        # If heating_config is provided, it takes precedence and stat_rate is overwritten
+        vol.Optional("stat_rate"): str,
+        vol.Optional("heating_config"): HEATING_CONFIG_SCHEMA,
+    }
+)
 
 GAS_SOURCE_SCHEMA = vol.All(
     vol.Schema(
@@ -755,7 +848,10 @@ class EnergyManager:
 
     def _process_energy_sources(self, sources: list[SourceType]) -> list[SourceType]:
         """Process energy sources and set stat_rate for power configs."""
-        from .helpers import generate_power_sensor_entity_id  # noqa: PLC0415
+        from .helpers import (  # noqa: PLC0415
+            generate_heating_power_sensor_entity_id,
+            generate_power_sensor_entity_id,
+        )
 
         processed: list[SourceType] = []
         for source in sources:
@@ -767,8 +863,30 @@ class EnergyManager:
                 source = self._process_grid_power(
                     source, generate_power_sensor_entity_id
                 )
+            elif source["type"] == "heating":
+                source = self._process_heating_power(
+                    source, generate_heating_power_sensor_entity_id
+                )
             processed.append(source)
         return processed
+
+    def _process_heating_power(
+        self,
+        source: HeatingSourceType,
+        generate_entity_id: Callable[[str, HeatingConfig], str],
+    ) -> HeatingSourceType:
+        """Set stat_rate and stat_rate_to for heating if heating_config is specified."""
+        if "heating_config" not in source:
+            return source
+
+        config = source["heating_config"]
+
+        # If heating_config has stat_rate_from, just use it directly
+        if "stat_rate_from" in config:
+            return {**source, "stat_rate": config["stat_rate_from"]}
+
+        # Otherwise set stat_rate to generated entity_id
+        return {**source, "stat_rate": generate_entity_id("heating", config)}
 
     def _process_battery_power(
         self,
