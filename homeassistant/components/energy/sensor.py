@@ -23,7 +23,9 @@ from homeassistant.const import (
     ATTR_UNIT_OF_MEASUREMENT,
     UnitOfEnergy,
     UnitOfPower,
+    UnitOfTemperature,
     UnitOfVolume,
+    UnitOfVolumeFlowRate,
 )
 from homeassistant.core import (
     HomeAssistant,
@@ -41,8 +43,13 @@ from homeassistant.util import dt as dt_util, unit_conversion
 from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from .const import DOMAIN
-from .data import EnergyManager, PowerConfig, async_get_manager
-from .helpers import generate_power_sensor_entity_id, generate_power_sensor_unique_id
+from .data import EnergyManager, HeatingConfig, PowerConfig, async_get_manager
+from .helpers import (
+    generate_heating_power_sensor_entity_id,
+    generate_heating_power_sensor_unique_id,
+    generate_power_sensor_entity_id,
+    generate_power_sensor_unique_id,
+)
 
 SUPPORTED_STATE_CLASSES = {
     SensorStateClass.MEASUREMENT,
@@ -85,7 +92,7 @@ async def async_setup_platform(
 class SourceAdapter:
     """Adapter to allow sources and their flows to be used as sensors."""
 
-    source_type: Literal["grid", "gas", "water"]
+    source_type: Literal["grid", "gas", "water", "heating"]
     flow_type: Literal["flow_from", "flow_to"] | None
     stat_energy_key: Literal["stat_energy_from", "stat_energy_to"]
     total_money_key: Literal["stat_cost", "stat_compensation"]
@@ -119,6 +126,14 @@ SOURCE_ADAPTERS: Final = (
         "Cost",
         "cost",
     ),
+    SourceAdapter(
+        "heating",
+        None,
+        "stat_energy_from",
+        "stat_cost",
+        "Cost",
+        "cost",
+    ),
 )
 
 # Separate adapter for grid export compensation (needs different price field)
@@ -130,6 +145,9 @@ GRID_EXPORT_ADAPTER: Final = SourceAdapter(
     "Compensation",
     "compensation",
 )
+
+# All energy power sensor types
+type PowerSensor = EnergyPowerSensor | HeatingPowerSensor
 
 
 class EntityNotFoundError(HomeAssistantError):
@@ -146,7 +164,7 @@ class SensorManager:
         self.manager = manager
         self.async_add_entities = async_add_entities
         self.current_entities: dict[tuple[str, str | None, str], EnergyCostSensor] = {}
-        self.current_power_entities: dict[str, EnergyPowerSensor] = {}
+        self.current_power_entities: dict[str, PowerSensor] = {}
 
     async def async_start(self) -> None:
         """Start."""
@@ -157,7 +175,7 @@ class SensorManager:
 
     async def _process_manager_data(self) -> None:
         """Process manager data."""
-        to_add: list[EnergyCostSensor | EnergyPowerSensor] = []
+        to_add: list[EnergyCostSensor | PowerSensor] = []
         to_remove = dict(self.current_entities)
         power_to_remove = dict(self.current_power_entities)
 
@@ -215,7 +233,7 @@ class SensorManager:
         self,
         adapter: SourceAdapter,
         config: Mapping[str, Any],
-        to_add: list[EnergyCostSensor | EnergyPowerSensor],
+        to_add: list[EnergyCostSensor | PowerSensor],
         to_remove: dict[tuple[str, str | None, str], EnergyCostSensor],
     ) -> None:
         """Process sensor data."""
@@ -252,7 +270,7 @@ class SensorManager:
     def _process_grid_export_sensor(
         self,
         config: Mapping[str, Any],
-        to_add: list[EnergyCostSensor | EnergyPowerSensor],
+        to_add: list[EnergyCostSensor | PowerSensor],
         to_remove: dict[tuple[str, str | None, str], EnergyCostSensor],
     ) -> None:
         """Process grid export compensation sensor (unified format).
@@ -302,8 +320,8 @@ class SensorManager:
     def _process_power_sensor_data(
         self,
         energy_source: Mapping[str, Any],
-        to_add: list[EnergyCostSensor | EnergyPowerSensor],
-        to_remove: dict[str, EnergyPowerSensor],
+        to_add: list[EnergyCostSensor | PowerSensor],
+        to_remove: dict[str, PowerSensor],
     ) -> None:
         """Process power sensor data for battery and grid sources."""
         source_type = energy_source.get("type")
@@ -315,6 +333,12 @@ class SensorManager:
                 self._create_or_keep_power_sensor(
                     source_type, power_config, to_add, to_remove
                 )
+        elif source_type == "heating":
+            heating_config = energy_source.get("heating_config")
+            if heating_config and self._needs_heating_power_sensor(heating_config):
+                self._create_or_keep_heating_sensor(
+                    source_type, heating_config, to_add, to_remove
+                )
 
     @staticmethod
     def _needs_power_sensor(power_config: PowerConfig) -> bool:
@@ -325,12 +349,23 @@ class SensorManager:
             "stat_rate_from" in power_config and "stat_rate_to" in power_config
         )
 
+    @staticmethod
+    def _needs_heating_power_sensor(heating_config: HeatingConfig) -> bool:
+        """Check if heating_config needs a transform sensor."""
+        # Only create sensors for flow rate derived configs
+        return (
+            "stat_rate_from" not in heating_config
+            and "stat_rate_fluid" in heating_config
+            and "stat_temp_from" in heating_config
+            and "stat_temp_to" in heating_config
+        )
+
     def _create_or_keep_power_sensor(
         self,
         source_type: str,
         power_config: PowerConfig,
-        to_add: list[EnergyCostSensor | EnergyPowerSensor],
-        to_remove: dict[str, EnergyPowerSensor],
+        to_add: list[EnergyCostSensor | PowerSensor],
+        to_remove: dict[str, PowerSensor],
     ) -> None:
         """Create a power sensor or keep an existing one."""
         unique_id = generate_power_sensor_unique_id(source_type, power_config)
@@ -345,6 +380,30 @@ class SensorManager:
             power_config,
             unique_id,
             generate_power_sensor_entity_id(source_type, power_config),
+        )
+        self.current_power_entities[unique_id] = sensor
+        to_add.append(sensor)
+
+    def _create_or_keep_heating_sensor(
+        self,
+        source_type: str,
+        heating_config: HeatingConfig,
+        to_add: list[EnergyCostSensor | PowerSensor],
+        to_remove: dict[str, PowerSensor],
+    ) -> None:
+        """Create a heating power sensor or keep an existing one."""
+        unique_id = generate_heating_power_sensor_unique_id(source_type, heating_config)
+
+        # If entity already exists, keep it
+        if unique_id in to_remove:
+            to_remove.pop(unique_id)
+            return
+
+        sensor = HeatingPowerSensor(
+            source_type,
+            heating_config,
+            unique_id,
+            generate_heating_power_sensor_entity_id(source_type, heating_config),
         )
         self.current_power_entities[unique_id] = sensor
         to_add.append(sensor)
@@ -794,6 +853,180 @@ class EnergyPowerSensor(SensorEntity):
         # Set name for combined mode
         if self._is_combined:
             self._attr_name = f"{self._source_type.title()} Power"
+
+        self._update_state()
+
+        # Track state changes on all source sensors
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass,
+                self._source_sensors,
+                self._async_state_changed_listener,
+            )
+        )
+        _set_result_unless_done(self.add_finished)
+
+    @callback
+    def _async_state_changed_listener(self, *_: Any) -> None:
+        """Handle source sensor state changes."""
+        self._update_state()
+        self.async_write_ha_state()
+
+    @callback
+    def add_to_platform_abort(self) -> None:
+        """Abort adding an entity to a platform."""
+        _set_result_unless_done(self.add_finished)
+        super().add_to_platform_abort()
+
+
+class HeatingPowerSensor(SensorEntity):
+    """Transform heating power delivered sensor values.
+
+    This sensor handles calculation of heating power delivered from
+    fluid flow rate and flow/return temperature sensors.
+    """
+
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        source_type: str,
+        config: HeatingConfig,
+        unique_id: str,
+        entity_id: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__()
+        self._source_type = source_type
+        self._config: HeatingConfig = config
+        self._attr_unique_id = unique_id
+        self.entity_id = entity_id
+        self._source_sensors: list[str] = []
+
+        # Ensure we have all required sensors
+        self._is_calculated = (
+            "stat_rate_fluid" in config
+            and "stat_temp_from" in config
+            and "stat_temp_to" in config
+        )
+
+        # Get fluid heat capacity. Default is specific thermal capacity of water in J/kg/K.
+        heat_capacity = config.get("number_heat_capacity")
+        self._heat_capacity: float = (
+            heat_capacity if heat_capacity is not None else 4184
+        )
+
+        # Determine source sensors
+        if self._is_calculated:
+            self._source_sensors = [
+                config["stat_rate_fluid"],
+                config["stat_temp_from"],
+                config["stat_temp_to"],
+            ]
+
+        # add_finished is set when either async_added_to_hass or add_to_platform_abort
+        # is called
+        self.add_finished: asyncio.Future[None] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        if self._is_calculated:
+            flow_rate_state = self.hass.states.get(self._source_sensors[0])
+            temp_from_state = self.hass.states.get(self._source_sensors[1])
+            temp_to_state = self.hass.states.get(self._source_sensors[2])
+            return (
+                _is_valid_sensor_state(flow_rate_state)
+                and _is_valid_sensor_state(temp_from_state)
+                and _is_valid_sensor_state(temp_to_state)
+            )
+        return True
+
+    @callback
+    def _update_state(self) -> None:
+        """Update the sensor state based on source sensors."""
+        if self._is_calculated:
+            flow_rate_state = self.hass.states.get(self._source_sensors[0])
+            temp_from_state = self.hass.states.get(self._source_sensors[1])
+            temp_to_state = self.hass.states.get(self._source_sensors[2])
+            if (
+                not _is_valid_sensor_state(flow_rate_state)
+                or not _is_valid_sensor_state(temp_from_state)
+                or not _is_valid_sensor_state(temp_to_state)
+            ):
+                self._attr_native_value = None
+                return
+
+            try:
+                flow_rate = float(flow_rate_state.state)
+                temp_from = float(temp_from_state.state)
+                temp_to = float(temp_to_state.state)
+            except ValueError:
+                self._attr_native_value = None
+                return
+
+            # Get units from state attributes
+            flow_rate_unit = flow_rate_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+            temp_from_unit = temp_from_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+            temp_to_unit = temp_to_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+
+            # Convert to Watts if units are present
+            if flow_rate_unit:
+                flow_rate = unit_conversion.VolumeFlowRateConverter.convert(
+                    flow_rate, flow_rate_unit, UnitOfVolumeFlowRate.LITERS_PER_SECOND
+                )
+            if temp_from_unit:
+                temp_from = unit_conversion.TemperatureConverter.convert(
+                    temp_from, temp_from_unit, UnitOfTemperature.KELVIN
+                )
+            if temp_to_unit:
+                temp_to = unit_conversion.TemperatureConverter.convert(
+                    temp_to, temp_to_unit, UnitOfTemperature.KELVIN
+                )
+
+            # Power delivered is flow rate in L/s times delta temperature in K, times heat capacity.
+            # This is allowed to be a negative value - indicates cooling or e.g. heatpump defrost.
+            self._attr_native_value = (
+                flow_rate * (temp_from - temp_to) * self._heat_capacity
+            )
+
+    async def async_added_to_hass(self) -> None:
+        """Register callbacks."""
+        # Set name based on source sensor(s)
+        if self._source_sensors:
+            entity_reg = er.async_get(self.hass)
+            device_id = None
+
+            # Native unit of measurement is always W as that is output of calculation.
+            self._attr_native_unit_of_measurement = UnitOfPower.WATT
+
+            # Try to assign to same device as source sensor(s)
+            # Note: We use manual entity registry update instead of _attr_device_info
+            # because device assignment depends on runtime information from the entity
+            # registry (which source sensor has a device). This information isn't
+            # available during __init__, and the entity is already registered before
+            # async_added_to_hass runs, making the standard _attr_device_info pattern
+            # incompatible with this use case.
+            for source_sensor in self._source_sensors:
+                if source_entry := entity_reg.async_get(source_sensor):
+                    device_id = source_entry.device_id
+                    break
+
+            # Update entity registry entry with device_id
+            if device_id and (power_entry := entity_reg.async_get(self.entity_id)):
+                entity_reg.async_update_entity(
+                    power_entry.entity_id, device_id=device_id
+                )
+            else:
+                self._attr_has_entity_name = False
+
+        # Set name based on source type. Sensor is for power delivered
+        self._attr_name = f"{self._source_type.title()} Power Delivered"
 
         self._update_state()
 
