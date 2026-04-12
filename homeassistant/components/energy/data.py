@@ -84,15 +84,11 @@ class HeatingConfig(TypedDict):
     """Dictionary holding heating power sensor configuration options.
 
     Users configure the following sensors:
-    1. A single optional sensor consisting of power consumed
     2. Sensors for flow temperature, return temperature, flow rate.
     3. A single sensor consisting of power delivered.
     The power delivered sensor can be omitted and it will be calculated
     from the three other sensors and heat capacity value.
     """
-
-    # Optional power to heating system
-    stat_rate_to: NotRequired[str]
 
     # Heating system metering parameters
     stat_rate_fluid: str  # Instantaneous fluid flow rate: L/min, gal/min, m³/h, etc.
@@ -100,7 +96,7 @@ class HeatingConfig(TypedDict):
     stat_temp_to: str  # Fluid return temperature
 
     # Optional power delivered as heat. Can be calculated from above.
-    stat_rate_from: NotRequired[str]
+    stat_rate: NotRequired[str]
 
     # Used to calculate power delivered if stat_rate is not provided.
     # Heat capacity of fluid (J/kg/K). By default assumes water, 4184 J/kg/K.
@@ -247,6 +243,18 @@ class HeatingSourceType(TypedDict):
 
     # Instantaneous power delivered (derived from heating_config, either original or calculated)
     stat_rate: NotRequired[str]
+
+    # statistic_id of costs ($) incurred from the supply meter
+    # If set to None and entity_energy_price or number_energy_price are configured,
+    # an EnergyCostSensor will be automatically created
+    stat_cost: str | None
+
+    # Used to generate costs if stat_cost is set to None
+    entity_energy_price: str | None  # entity_id of an entity providing price ($/unit)
+    number_energy_price: float | None  # Price for energy ($/unit)
+
+    # Optional power consumed by heating system
+    stat_rate_to: NotRequired[str]
 
     # User's original heating sensor configuration
     heating_config: NotRequired[HeatingConfig]
@@ -411,7 +419,7 @@ def _validate_heating_config(val: dict[str, Any]) -> dict[str, Any]:
         raise vol.Invalid("heating_config must have at least one option")
 
     # Ensure at least one power delivered configuration method is used
-    has_delivered = "stat_rate_from" in val
+    has_delivered = "stat_rate" in val
     has_flow = "stat_rate_fluid" in val
 
     methods_count = sum([has_delivered, has_flow])
@@ -426,9 +434,8 @@ def _validate_heating_config(val: dict[str, Any]) -> dict[str, Any]:
 HEATING_CONFIG_SCHEMA = vol.All(
     vol.Schema(
         {
-            vol.Optional("stat_rate_to"): str,
-            vol.Optional("stat_rate_from"): str,
-            # from=supply, to=return
+            vol.Optional("stat_rate"): str,
+            # from=output from heater, to=return to heater
             vol.Inclusive("stat_rate_fluid", "flow_sensors"): str,
             vol.Inclusive("stat_temp_from", "flow_sensors"): str,
             vol.Inclusive("stat_temp_to", "flow_sensors"): str,
@@ -571,15 +578,22 @@ BATTERY_SOURCE_SCHEMA = vol.Schema(
 )
 
 HEATING_SOURCE_SCHEMA = vol.All(
-    {
-        vol.Required("type"): "heating",
-        vol.Optional("stat_energy_from"): str,
-        vol.Required("stat_energy_to"): str,
-        # Both stat_rate and heating_config are optional
-        # If heating_config is provided, it takes precedence and stat_rate is overwritten
-        vol.Optional("stat_rate"): str,
-        vol.Optional("heating_config"): HEATING_CONFIG_SCHEMA,
-    }
+    vol.Schema(
+        {
+            vol.Required("type"): "heating",
+            vol.Optional("stat_energy_from"): str,
+            vol.Required("stat_energy_to"): str,
+            vol.Optional("stat_cost"): vol.Any(str, None),
+            vol.Optional("entity_energy_price"): vol.Any(str, None),
+            vol.Optional("number_energy_price"): vol.Any(vol.Coerce(float), None),
+            # Both stat_rate and heating_config are optional
+            # If heating_config is provided, it takes precedence and stat_rate is overwritten
+            vol.Optional("stat_rate"): str,
+            vol.Optional("heating_config"): HEATING_CONFIG_SCHEMA,
+            vol.Optional("stat_rate_to"): str,
+        },
+    ),
+    _reject_price_for_external_stat(stat_key="stat_energy_to"),
 )
 
 GAS_SOURCE_SCHEMA = vol.All(
@@ -668,6 +682,7 @@ ENERGY_SOURCE_SCHEMA = vol.All(
                     "solar": SOLAR_SOURCE_SCHEMA,
                     "battery": BATTERY_SOURCE_SCHEMA,
                     "gas": GAS_SOURCE_SCHEMA,
+                    "heating": HEATING_SOURCE_SCHEMA,
                     "water": WATER_SOURCE_SCHEMA,
                 },
             )
@@ -875,15 +890,15 @@ class EnergyManager:
         source: HeatingSourceType,
         generate_entity_id: Callable[[str, HeatingConfig], str],
     ) -> HeatingSourceType:
-        """Set stat_rate and stat_rate_to for heating if heating_config is specified."""
+        """Set stat_rate for heating if heating_config is specified."""
         if "heating_config" not in source:
             return source
 
         config = source["heating_config"]
 
-        # If heating_config has stat_rate_from, just use it directly
-        if "stat_rate_from" in config:
-            return {**source, "stat_rate": config["stat_rate_from"]}
+        # If heating_config has stat_rate (standard), just use it directly
+        if "stat_rate" in config:
+            return {**source, "stat_rate": config["stat_rate"]}
 
         # Otherwise set stat_rate to generated entity_id
         return {**source, "stat_rate": generate_entity_id("heating", config)}

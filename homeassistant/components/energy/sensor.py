@@ -129,7 +129,7 @@ SOURCE_ADAPTERS: Final = (
     SourceAdapter(
         "heating",
         None,
-        "stat_energy_from",
+        "stat_energy_to",
         "stat_cost",
         "Cost",
         "cost",
@@ -354,7 +354,7 @@ class SensorManager:
         """Check if heating_config needs a transform sensor."""
         # Only create sensors for flow rate derived configs
         return (
-            "stat_rate_from" not in heating_config
+            "stat_rate" not in heating_config
             and "stat_rate_fluid" in heating_config
             and "stat_temp_from" in heating_config
             and "stat_temp_to" in heating_config
@@ -469,7 +469,7 @@ class EnergyCostSensor(SensorEntity):
     @callback
     def _update_cost(self) -> None:
         """Update incurred costs."""
-        if self._adapter.source_type == "grid":
+        if self._adapter.source_type in {"grid", "heating"}:
             valid_units = VALID_ENERGY_UNITS
             default_price_unit: str | None = UnitOfEnergy.KILO_WATT_HOUR
 

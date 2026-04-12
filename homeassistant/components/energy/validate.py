@@ -393,10 +393,13 @@ def _async_validate_cost_stat(
 
 @callback
 def _async_validate_auto_generated_cost_entity(
-    hass: HomeAssistant, energy_entity_id: str, issues: ValidationIssues
+    hass: HomeAssistant, energy_entity_id: str | None, issues: ValidationIssues
 ) -> None:
     """Validate that the auto generated cost entity is correct."""
-    if energy_entity_id not in hass.data[DOMAIN]["cost_sensors"]:
+    if (
+        energy_entity_id is None
+        or energy_entity_id not in hass.data[DOMAIN]["cost_sensors"]
+    ):
         # The cost entity has not been setup
         return
 
@@ -618,6 +621,96 @@ def _validate_gas_source(
         )
 
 
+def _validate_heating_source(
+    hass: HomeAssistant,
+    source: data.HeatingSourceType,
+    statistics_metadata: dict[str, tuple[int, recorder.models.StatisticMetaData]],
+    wanted_statistics_metadata: set[str],
+    source_result: ValidationIssues,
+    validate_calls: list[functools.partial[None]],
+) -> None:
+    """Validate heating energy source."""
+    wanted_statistics_metadata.add(source["stat_energy_from"])
+    validate_calls.append(
+        functools.partial(
+            _async_validate_usage_stat,
+            hass,
+            statistics_metadata,
+            source["stat_energy_from"],
+            ENERGY_USAGE_DEVICE_CLASSES,
+            ENERGY_USAGE_UNITS,
+            ENERGY_UNIT_ERROR,
+            source_result,
+        )
+    )
+
+    # Validate energy consumed if present
+    if (stat_consumed := source.get("stat_energy_to")) is not None:
+        validate_calls.append(
+            functools.partial(
+                _async_validate_usage_stat,
+                hass,
+                statistics_metadata,
+                stat_consumed,
+                ENERGY_USAGE_DEVICE_CLASSES,
+                ENERGY_USAGE_UNITS,
+                ENERGY_UNIT_ERROR,
+                source_result,
+            )
+        )
+
+        if (stat_cost := source.get("stat_cost")) is not None:
+            wanted_statistics_metadata.add(stat_cost)
+            validate_calls.append(
+                functools.partial(
+                    _async_validate_cost_stat,
+                    hass,
+                    statistics_metadata,
+                    stat_cost,
+                    source_result,
+                )
+            )
+        elif (entity_energy_price := source.get("entity_energy_price")) is not None:
+            validate_calls.append(
+                functools.partial(
+                    _async_validate_price_entity,
+                    hass,
+                    entity_energy_price,
+                    source_result,
+                    ENERGY_PRICE_UNITS,
+                    ENERGY_PRICE_UNIT_ERROR,
+                )
+            )
+
+        if (
+            source.get("entity_energy_price") is not None
+            or source.get("number_energy_price") is not None
+        ):
+            validate_calls.append(
+                functools.partial(
+                    _async_validate_auto_generated_cost_entity,
+                    hass,
+                    source["stat_energy_to"],
+                    source_result,
+                )
+            )
+
+    if stat_rate := source.get("stat_rate"):
+        wanted_statistics_metadata.add(stat_rate)
+        validate_calls.append(
+            functools.partial(
+                _async_validate_power_stat,
+                hass,
+                statistics_metadata,
+                stat_rate,
+                POWER_USAGE_DEVICE_CLASSES,
+                POWER_USAGE_UNITS,
+                POWER_UNIT_ERROR,
+                source_result,
+            )
+        )
+
+
 def _validate_water_source(
     hass: HomeAssistant,
     source: data.WaterSourceType,
@@ -722,6 +815,16 @@ async def async_validate(hass: HomeAssistant) -> EnergyPreferencesValidation:
 
         elif source["type"] == "gas":
             _validate_gas_source(
+                hass,
+                source,
+                statistics_metadata,
+                wanted_statistics_metadata,
+                source_result,
+                validate_calls,
+            )
+
+        elif source["type"] == "heating":
+            _validate_heating_source(
                 hass,
                 source,
                 statistics_metadata,
